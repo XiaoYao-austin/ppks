@@ -120,11 +120,6 @@ func CollPubKey(pubs []sm2.PublicKey) *sm2.PublicKey {
 //		待加密点	D
 // 返回：
 // 		密文
-// ************************************
-// sm2的加密使用了kdf密钥导出函数，其中使用了hash算法，因此不适用于本方案ks。
-// unlynx库的加密是将data映射到点然后解密时暴力破解，从点解得data，其data限制为uint64
-// unlynx加密的内容是查询结果，对结果直接查询，所以只能走暴力破解的路子。
-// ************************************
 func PointEncrypt(pub *sm2.PublicKey, D *CurvePoint) (*CipherText, error) {
 	var ct CipherText
 
