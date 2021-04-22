@@ -64,6 +64,66 @@ func TestGetPubKey(t *testing.T) {
 func TestGenPoint(t *testing.T) {
 	// 集成于TestPointEncrypt&TestPointDecrypt，不单独测试
 }
+func TestCollPrivKey(t *testing.T) {
+	fmt.Println()
+
+	////////////////////////
+	// 聚合私钥数量//////////
+	lens := 10
+	////////////////////////
+
+	privKeys := make([]sm2.PrivateKey, lens)
+	pubKeys := make([]sm2.PublicKey, lens)
+
+	for i := 0; i < lens; i++ {
+		priv, err := GenPrivKey() // 生成第i个密钥对
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// 填充私钥
+		privKeys[i] = *priv
+		pubKeys[i] = *(GetPubKey(priv))
+	}
+
+	// 累加私钥
+	collPrivKey := CollPrivKey(privKeys)
+	collPubKey := CollPubKey(pubKeys)
+
+	D := GenPoint()
+
+	ct, _ := PointEncrypt(collPubKey, D)
+
+	dct, _ := PointDecrypt(ct, collPrivKey)
+
+	vr := collPrivKey
+	fmt.Println("调用集合私钥函数得到的私钥")
+	fmt.Println("type of var: ", reflect.TypeOf(vr))
+	fmt.Println("value of var: ", vr)
+
+	vr1 := collPubKey
+	fmt.Println("调用集合公钥函数得到的公钥")
+	fmt.Println("type of var: ", reflect.TypeOf(vr1))
+	fmt.Println("value of var: ", vr1)
+
+	vr2 := D
+	fmt.Println("加密点D")
+	fmt.Println("type of var: ", reflect.TypeOf(vr2))
+	fmt.Println("value of var: ", vr2)
+
+	vr3 := ct
+	fmt.Println("用集合公钥加密的密文")
+	fmt.Println("type of var: ", reflect.TypeOf(vr3))
+	fmt.Println("value of var: ", vr3)
+
+	vr4 := dct
+	fmt.Println("用集合私钥解密的明文")
+	fmt.Println("type of var: ", reflect.TypeOf(vr4))
+	fmt.Println("value of var: ", vr4)
+
+	fmt.Println()
+}
+
 func TestCollPubKey(t *testing.T) {
 	fmt.Println()
 
