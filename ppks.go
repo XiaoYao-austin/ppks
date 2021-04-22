@@ -95,6 +95,41 @@ func GenPoint() *CurvePoint {
 	return (*CurvePoint)(&d.PublicKey)
 }
 
+// CollPrivKey returns the addition of the private keys in privs.
+// 聚合私钥：加和privs中的私钥，并返回。
+//
+// 参数：
+//		私钥slice	privs
+// 返回：
+// 		聚合私钥
+func CollPrivKey(privs []sm2.PrivateKey) *sm2.PrivateKey {
+
+	// 返回集合公钥
+	collPrivKey := privs[0]
+
+	// 私钥&公钥变量
+	collPriv, _ := new(big.Int).SetString("0", 16)
+	// pubKeys := make([]sm2.PublicKey, len(privs))
+
+	// 遍历私钥组
+	for i := 0; i < len(privs); i++ {
+		// 累加私钥
+		collPriv.Add(collPriv, privs[i].D)
+		if collPriv.Cmp(collPrivKey.Curve.Params().N) >= 0 {
+			collPriv.Mod(collPriv, collPrivKey.Curve.Params().N)
+		}
+		// 赋值公钥组
+		// pubKeys[i] = *(GetPubKey(&privs[i]))
+	}
+
+	// 分别赋值私钥&公钥
+	collPrivKey.D = collPriv
+	// collPrivKey.PublicKey = *CollPubKey(pubKeys)
+	collPrivKey.PublicKey.X, collPrivKey.PublicKey.Y = collPrivKey.PublicKey.Curve.ScalarBaseMult(collPrivKey.D.Bytes())
+
+	return &collPrivKey
+}
+
 // CollPubKey returns the addition of the public keys in pubs.
 // 聚合公钥：加和pubs中的公钥，并返回。
 //
