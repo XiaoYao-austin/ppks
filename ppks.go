@@ -24,6 +24,7 @@ import (
 	"math/big"
 
 	"github.com/tjfoc/gmsm/sm2"
+	"github.com/tjfoc/gmsm/sm3"
 )
 
 /*
@@ -56,6 +57,12 @@ type CipherText struct {
 // CipherVector is a slice of ElGamal encrypted points.
 // 密文向量，基于群的ElGamal密文slice。
 type CipherVector []CipherText
+
+type Pai struct {
+	c, r1, r2 *(big.Int)
+}
+
+type PaiVector []Pai
 
 // GenPrivKey generates a private key at random.
 // 生成私钥：随机生成一个私钥并返回。
@@ -154,7 +161,7 @@ func CollPubKey(pubs []sm2.PublicKey) *sm2.PublicKey {
 //		公钥		pub
 //		待加密点	D
 // 返回：
-// 		密文
+// 		密文		ct{K,C}
 func PointEncrypt(pub *sm2.PublicKey, D *CurvePoint) (*CipherText, error) {
 	var ct CipherText
 
@@ -199,7 +206,8 @@ func PointDecrypt(ct *CipherText, priv *sm2.PrivateKey) (*CurvePoint, error) {
 	rKx, rKy := curve.ScalarMult(ct.K.X, ct.K.Y, priv.D.Bytes())
 
 	// 求点-rK，纵坐标取负值
-	negrKy := rKy.Neg(rKy)
+	negrKy := new(big.Int).Neg(rKy)
+	negrKy.Mod(negrKy, curve.Params().P)
 
 	// 密文右侧点C减去rK(加上负rK)，得到密文点
 	var D CurvePoint
@@ -234,15 +242,16 @@ func PointDecrypt(ct *CipherText, priv *sm2.PrivateKey) (*CurvePoint, error) {
 //		密文左侧点	rB
 //		私钥		priv
 // 返回：
-// 		份额密文
-func ShareCal(targetPubKey *sm2.PublicKey, rB *CurvePoint, priv *sm2.PrivateKey) (*CipherText, error) {
+// 		份额密文：	share
+//		随机数：	ri
+func ShareCal(targetPubKey *sm2.PublicKey, rB *CurvePoint, priv *sm2.PrivateKey) (*CipherText, *big.Int, error) {
 	var share CipherText
 
 	// 生成随机数ri
 	curve := priv.Curve                             // 从公钥提取曲线
 	ri, err := randFieldElement(curve, rand.Reader) // 从有限域中获得随机元素
 	if err != nil {
-		return &share, err
+		return &share, ri, err
 	}
 
 	// 计算左侧点K，riB
@@ -252,6 +261,7 @@ func ShareCal(targetPubKey *sm2.PublicKey, rB *CurvePoint, priv *sm2.PrivateKey)
 	// 计算-rKi，即-rBki，其中，Ki为己方公钥，ki为己方私钥
 	rBkix, rBkiy := curve.ScalarMult(rB.X, rB.Y, priv.D.Bytes())
 	rBkiy.Neg(rBkiy)
+	rBkiy.Mod(rBkiy, curve.Params().P)
 
 	// 计算riU
 	riUx, riUy := curve.ScalarMult(targetPubKey.X, targetPubKey.Y, ri.Bytes())
@@ -260,7 +270,439 @@ func ShareCal(targetPubKey *sm2.PublicKey, rB *CurvePoint, priv *sm2.PrivateKey)
 	share.C.Curve = priv.Curve
 	share.C.X, share.C.Y = curve.Add(rBkix, rBkiy, riUx, riUy)
 
-	return &share, nil
+	return &share, ri, nil
+}
+
+// ShareProofGen generate the proof of a share for the random nonce ri and the private-key priv.
+// 份额计算证明生成: 使用计算份额生成的随机数ri和节点私钥priv，生成份额share的计算证明，并返回。
+//
+// 参数：
+//		随机数：	ri
+//		节点私钥：	priv
+//		份额：		share
+//		目标公钥：	targetPubKey
+//		密文左侧点： rB
+// 返回：
+// 		证明pai：	c,r1,r2
+func ShareProofGen(ri *big.Int, priv *sm2.PrivateKey, share *CipherText, targetPubKey *sm2.PublicKey, rB *CurvePoint) (*big.Int, *big.Int, *big.Int, error) {
+	// share.K = ri*B ; priv.PublicKey = priv*B ;
+	// targetPubKey*ri + (-rB*priv) = share.C
+	// y1 = ri
+	// y2 = priv.D
+	// B = B
+	// Y1 = riB = share.K
+	// Y2 = priv.PublicKey
+	// A1 = targetPubKey
+	// A2 = -rB
+	// A = share.C
+	curve := priv.Curve
+	var B CurvePoint
+	B.Curve = curve
+	B.X = curve.Params().Gx
+	B.Y = curve.Params().Gy
+	A2 := new(CurvePoint)
+	A2.Curve = rB.Curve
+	A2.X = new(big.Int).Set(rB.X)
+	A2.Y = new(big.Int).Set(rB.Y)
+	A2.Y.Neg(A2.Y)
+	A2.Y.Mod(A2.Y, curve.Params().P)
+
+	c, r1, r2, err := ProofGen(ri, priv.D, &B, &share.K, (*CurvePoint)(&priv.PublicKey), (*CurvePoint)(targetPubKey), A2, &share.C)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return c, r1, r2, err
+}
+
+// ShareProofGenNoB generate the proof of a share for the random nonce ri and the private-key priv.
+// 份额计算证明生成: 使用计算份额生成的随机数ri和节点私钥priv，生成份额share的计算证明，并返回。
+//
+// 参数：
+//		随机数：	ri
+//		节点私钥：	priv
+//		份额：		share
+//		目标公钥：	targetPubKey
+//		密文左侧点： rB
+// 返回：
+// 		证明pai：	c,r1,r2
+func ShareProofGenNoB(ri *big.Int, priv *sm2.PrivateKey, share *CipherText, targetPubKey *sm2.PublicKey, rB *CurvePoint) (*big.Int, *big.Int, *big.Int, error) {
+	// share.K = ri*B ; priv.PublicKey = priv*B ;
+	// targetPubKey*ri + (-rB*priv) = share.C
+	// y1 = ri
+	// y2 = priv.D
+	// (B = B)
+	// Y1 = riB = share.K
+	// Y2 = priv.PublicKey
+	// A1 = targetPubKey
+	// A2 = -rB
+	// A = share.C
+	curve := priv.Curve
+	A2 := new(CurvePoint)
+	A2.Curve = rB.Curve
+	A2.X = new(big.Int).Set(rB.X)
+	A2.Y = new(big.Int).Set(rB.Y)
+	A2.Y.Neg(A2.Y)
+	A2.Y.Mod(A2.Y, curve.Params().P)
+
+	c, r1, r2, err := ProofGenNoB(ri, priv.D, &share.K, (*CurvePoint)(&priv.PublicKey), (*CurvePoint)(targetPubKey), A2, &share.C)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return c, r1, r2, err
+}
+
+// ShareProofVry verify the proof pai=(c,r1,r2) for the calculation of the share.
+// 份额证明验证: 验证证明pai=(c,r1,r2)是否能够证明份额share是由随机数ri和节点私钥priv计算得来，即公开点(share,targetPubKey,rB)满足约束
+//     {share.K = ri*B ; priv.PublicKey = priv*B ;
+//      targetPubKey*ri + (-rB*priv) = share.C}，
+// 并返回。
+//
+// 参数：
+//		证明pai：	c,r1,r2
+//		份额：		share
+//		节点公钥：	nodePubKey
+//		目标公钥：	targetPubKey
+//		密文左侧点： rB
+// 返回：
+// 		验证结果：	bool
+func ShareProofVry(c, r1, r2 *big.Int, share *CipherText, nodePubKey, targetPubKey *sm2.PublicKey, rB *CurvePoint) (bool, error) {
+	// share.K = ri*B ; priv.PublicKey = priv*B ;
+	// targetPubKey*ri + (-rB*priv) = share.C
+	// c,r1,r2 = c,r1,r2
+	// B = B
+	// Y1 = riB = share.K
+	// Y2 = nodePubKey
+	// A1 = targetPubKey
+	// A2 = -rB
+	// A = share.C
+	curve := targetPubKey.Curve
+	var B CurvePoint
+	B.Curve = curve
+	B.X = curve.Params().Gx
+	B.Y = curve.Params().Gy
+	A2 := new(CurvePoint)
+	A2.Curve = rB.Curve
+	A2.X = new(big.Int).Set(rB.X)
+	A2.Y = new(big.Int).Set(rB.Y)
+	A2.Y.Neg(A2.Y)
+	A2.Y.Mod(A2.Y, curve.Params().P)
+
+	flag, err := ProofVrf(c, r1, r2, &B, &share.K, (*CurvePoint)(nodePubKey), (*CurvePoint)(targetPubKey), A2, &share.C)
+	if err != nil {
+		return false, err
+	}
+
+	return flag, err
+}
+
+// ShareProofVryNoB verify the proof pai=(c,r1,r2) for the calculation of the share.
+// 份额证明验证: 验证证明pai=(c,r1,r2)是否能够证明份额share是由随机数ri和节点私钥priv计算得来，即公开点(share,targetPubKey,rB)满足约束
+//     {share.K = ri*B ; priv.PublicKey = priv*B ;
+//      targetPubKey*ri + (-rB*priv) = share.C}，
+// 并返回。
+//
+// 参数：
+//		证明pai：	c,r1,r2
+//		份额：		share
+//		节点公钥：	nodePubKey
+//		目标公钥：	targetPubKey
+//		密文左侧点： rB
+// 返回：
+// 		验证结果：	bool
+func ShareProofVryNoB(c, r1, r2 *big.Int, share *CipherText, nodePubKey, targetPubKey *sm2.PublicKey, rB *CurvePoint) (bool, error) {
+	// share.K = ri*B ; priv.PublicKey = priv*B ;
+	// targetPubKey*ri + (-rB*priv) = share.C
+	// c,r1,r2 = c,r1,r2
+	// (B = B)
+	// Y1 = riB = share.K
+	// Y2 = nodePubKey
+	// A1 = targetPubKey
+	// A2 = -rB
+	// A = share.C
+	curve := targetPubKey.Curve
+	A2 := new(CurvePoint)
+	A2.Curve = rB.Curve
+	A2.X = new(big.Int).Set(rB.X)
+	A2.Y = new(big.Int).Set(rB.Y)
+	A2.Y.Neg(A2.Y)
+	A2.Y.Mod(A2.Y, curve.Params().P)
+
+	flag, err := ProofVrfNoB(c, r1, r2, &share.K, (*CurvePoint)(nodePubKey), (*CurvePoint)(targetPubKey), A2, &share.C)
+	if err != nil {
+		return false, err
+	}
+
+	return flag, err
+}
+
+// ProofGen generate the proof for (y1,y2) with constraints {Y1=y1*B,Y2=y2*B,A1*y1+A2*y2=A}.
+// 零知识证明生成: 为（y1,y2）生成满足约束
+//     {Y1=y1*B,Y2=y2*B,A1*y1+A2*y2=A}
+// 的证明pai=(c,r1,r2)，并返回。
+//
+// 参数：
+//		标量：	y1,y2
+//		点：B,Y1,Y2,A1,A2,A
+// 返回：
+// 		证明:	c,r1,r2
+func ProofGen(y1, y2 *big.Int, B, Y1, Y2, A1, A2, A *CurvePoint) (*big.Int, *big.Int, *big.Int, error) {
+	// 生成两个随机数v1,v2
+	curve := Y1.Curve                               // 从公钥提取曲线
+	v1, err := randFieldElement(curve, rand.Reader) // 从有限域中获得随机元素
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	v2, err := randFieldElement(curve, rand.Reader) // 从有限域中获得随机元素
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// 计算承诺值：T1=v1*B, T2=v2*B, T3=v1*A1+v2*A2
+	var T1, T2, T3 CurvePoint
+	T1.Curve = curve
+	T1.X, T1.Y = curve.ScalarMult(B.X, B.Y, v1.Bytes())
+	T2.Curve = curve
+	T2.X, T2.Y = curve.ScalarMult(B.X, B.Y, v2.Bytes())
+	T3.Curve = curve
+	vA1x, vA1y := curve.ScalarMult(A1.X, A1.Y, v1.Bytes())
+	vA2x, vA2y := curve.ScalarMult(A2.X, A2.Y, v2.Bytes())
+	T3.X, T3.Y = curve.Add(vA1x, vA1y, vA2x, vA2y)
+
+	// 计算挑战：c=H(B,Y1,Y2,A1,A2,A,T1,T2,T3)
+	h := sm3.New()
+	h.Write(B.X.Bytes())
+	h.Write(B.Y.Bytes())
+	h.Write(Y1.X.Bytes())
+	h.Write(Y1.Y.Bytes())
+	h.Write(Y2.X.Bytes())
+	h.Write(Y2.Y.Bytes())
+	h.Write(A1.X.Bytes())
+	h.Write(A1.Y.Bytes())
+	h.Write(A2.X.Bytes())
+	h.Write(A2.Y.Bytes())
+	h.Write(A.X.Bytes())
+	h.Write(A.Y.Bytes())
+	h.Write(T1.X.Bytes())
+	h.Write(T1.Y.Bytes())
+	h.Write(T2.X.Bytes())
+	h.Write(T2.Y.Bytes())
+	h.Write(T3.X.Bytes())
+	h.Write(T3.Y.Bytes())
+	c := new(big.Int).SetBytes(h.Sum(nil)[:32])
+
+	// 计算应答：r1=v1-c*y1, r2=v2-c*y2
+	r1 := new(big.Int).Mul(c, y1)
+	r1.Mod(r1, curve.Params().N)
+	r1 = new(big.Int).Sub(v1, r1)
+	r1.Mod(r1, curve.Params().N)
+
+	r2 := new(big.Int).Mul(c, y2)
+	r2.Mod(r2, curve.Params().N)
+	r2.Sub(v2, r2)
+	r2.Mod(r2, curve.Params().N)
+
+	return c, r1, r2, nil
+}
+
+// ProofGenNoB generate the proof for (y1,y2) with constraints {Y1=y1*B,Y2=y2*B,A1*y1+A2*y2=A}.
+// 零知识证明生成: 为（y1,y2）生成满足约束
+//     {Y1=y1*B,Y2=y2*B,A1*y1+A2*y2=A}
+// 的证明pai=(c,r1,r2)，并返回。
+//
+// 参数：
+//		标量：	y1,y2
+//		点：Y1,Y2,A1,A2,A
+// 返回：
+// 		证明:	c,r1,r2
+func ProofGenNoB(y1, y2 *big.Int, Y1, Y2, A1, A2, A *CurvePoint) (*big.Int, *big.Int, *big.Int, error) {
+	// 生成两个随机数v1,v2
+	curve := Y1.Curve                               // 从公钥提取曲线
+	v1, err := randFieldElement(curve, rand.Reader) // 从有限域中获得随机元素
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	v2, err := randFieldElement(curve, rand.Reader) // 从有限域中获得随机元素
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// 计算承诺值：T1=v1*B, T2=v2*B, T3=v1*A1+v2*A2
+	var T1, T2, T3 CurvePoint
+	T1.Curve = curve
+	T1.X, T1.Y = curve.ScalarBaseMult(v1.Bytes())
+	T2.Curve = curve
+	T2.X, T2.Y = curve.ScalarBaseMult(v2.Bytes())
+	T3.Curve = curve
+	vA1x, vA1y := curve.ScalarMult(A1.X, A1.Y, v1.Bytes())
+	vA2x, vA2y := curve.ScalarMult(A2.X, A2.Y, v2.Bytes())
+	T3.X, T3.Y = curve.Add(vA1x, vA1y, vA2x, vA2y)
+
+	// 计算挑战：c=H(B,Y1,Y2,A1,A2,A,T1,T2,T3)
+	h := sm3.New()
+	h.Write(curve.Params().Gx.Bytes())
+	h.Write(curve.Params().Gy.Bytes())
+	h.Write(Y1.X.Bytes())
+	h.Write(Y1.Y.Bytes())
+	h.Write(Y2.X.Bytes())
+	h.Write(Y2.Y.Bytes())
+	h.Write(A1.X.Bytes())
+	h.Write(A1.Y.Bytes())
+	h.Write(A2.X.Bytes())
+	h.Write(A2.Y.Bytes())
+	h.Write(A.X.Bytes())
+	h.Write(A.Y.Bytes())
+	h.Write(T1.X.Bytes())
+	h.Write(T1.Y.Bytes())
+	h.Write(T2.X.Bytes())
+	h.Write(T2.Y.Bytes())
+	h.Write(T3.X.Bytes())
+	h.Write(T3.Y.Bytes())
+	c := new(big.Int).SetBytes(h.Sum(nil)[:32])
+
+	// 计算应答：r1=v1-c*y1, r2=v2-c*y2
+	r1 := new(big.Int).Mul(c, y1)
+	r1.Mod(r1, curve.Params().N)
+	r1 = new(big.Int).Sub(v1, r1)
+	r1.Mod(r1, curve.Params().N)
+
+	r2 := new(big.Int).Mul(c, y2)
+	r2.Mod(r2, curve.Params().N)
+	r2.Sub(v2, r2)
+	r2.Mod(r2, curve.Params().N)
+
+	return c, r1, r2, nil
+}
+
+// ProofVrf verify the proof pai=(c,r1,r2) with public points (B,Y1,Y2,A1,A2,A).
+// 零知识证明验证: 验证证明pai=(c,r1,r2)是否能够证明公开点(B,Y1,Y2,A1,A2,A)满足约束
+//     {Y1=y1*B,Y2=y2*B,A1*y1+A2*y2=A}，
+// 并返回。
+//
+// 参数：
+//		证明：	c,r1,r2
+//		点：B,Y1,Y2,A1,A2,A
+// 返回：
+// 		份额密文
+func ProofVrf(c, r1, r2 *big.Int, B, Y1, Y2, A1, A2, A *CurvePoint) (bool, error) {
+	curve := Y1.Curve
+
+	// 重构承诺：T1'=r1*B+c*Y1, T2'=r2*B+c*Y2, T3'=r1*A1+r2*A2+c*A
+	// 下文Ti' 用Ti指代
+	var T1, T2, T3 CurvePoint
+
+	T1.Curve = curve
+	rB1x, rB1y := curve.ScalarMult(B.X, B.Y, r1.Bytes())
+	cY1x, cY1y := curve.ScalarMult(Y1.X, Y1.Y, c.Bytes())
+	T1.X, T1.Y = curve.Add(rB1x, rB1y, cY1x, cY1y)
+
+	T2.Curve = curve
+	rB2x, rB2y := curve.ScalarMult(B.X, B.Y, r2.Bytes())
+	cY2x, cY2y := curve.ScalarMult(Y2.X, Y2.Y, c.Bytes())
+	T2.X, T2.Y = curve.Add(rB2x, rB2y, cY2x, cY2y)
+
+	T3.Curve = curve
+	rA1x, rA1y := curve.ScalarMult(A1.X, A1.Y, r1.Bytes())
+	rA2x, rA2y := curve.ScalarMult(A2.X, A2.Y, r2.Bytes())
+	cAx, cAy := curve.ScalarMult(A.X, A.Y, c.Bytes())
+	T3.X, T3.Y = curve.Add(rA1x, rA1y, rA2x, rA2y)
+	T3.X, T3.Y = curve.Add(T3.X, T3.Y, cAx, cAy)
+
+	// 计算新的挑战值：c'=H(B,Y1,Y2,A1,A2,A,T1',T2',T3')
+	// 如上，c'用c_new代替
+	h := sm3.New()
+	h.Write(B.X.Bytes())
+	h.Write(B.Y.Bytes())
+	h.Write(Y1.X.Bytes())
+	h.Write(Y1.Y.Bytes())
+	h.Write(Y2.X.Bytes())
+	h.Write(Y2.Y.Bytes())
+	h.Write(A1.X.Bytes())
+	h.Write(A1.Y.Bytes())
+	h.Write(A2.X.Bytes())
+	h.Write(A2.Y.Bytes())
+	h.Write(A.X.Bytes())
+	h.Write(A.Y.Bytes())
+	h.Write(T1.X.Bytes())
+	h.Write(T1.Y.Bytes())
+	h.Write(T2.X.Bytes())
+	h.Write(T2.Y.Bytes())
+	h.Write(T3.X.Bytes())
+	h.Write(T3.Y.Bytes())
+	c_new := new(big.Int).SetBytes(h.Sum(nil)[:32])
+
+	// 检查一致性：c?=c'
+	if 0 == c.Cmp(c_new) {
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
+// ProofVrfNoB verify the proof pai=(c,r1,r2) with public points (Y1,Y2,A1,A2,A).
+// 零知识证明验证: 验证证明pai=(c,r1,r2)是否能够证明公开点(Y1,Y2,A1,A2,A)满足约束
+//     {Y1=y1*B,Y2=y2*B,A1*y1+A2*y2=A}，
+// 并返回。
+//
+// 参数：
+//		证明：	c,r1,r2
+//		点：Y1,Y2,A1,A2,A
+// 返回：
+// 		份额密文
+func ProofVrfNoB(c, r1, r2 *big.Int, Y1, Y2, A1, A2, A *CurvePoint) (bool, error) {
+	curve := Y1.Curve
+
+	// 重构承诺：T1'=r1*B+c*Y1, T2'=r2*B+c*Y2, T3'=r1*A1+r2*A2+c*A
+	// 下文Ti' 用Ti指代
+	var T1, T2, T3 CurvePoint
+
+	T1.Curve = curve
+	r1Bx, r1By := curve.ScalarBaseMult(r1.Bytes())
+	cY1x, cY1y := curve.ScalarMult(Y1.X, Y1.Y, c.Bytes())
+	T1.X, T1.Y = curve.Add(r1Bx, r1By, cY1x, cY1y)
+
+	T2.Curve = curve
+	rB2x, rB2y := curve.ScalarBaseMult(r2.Bytes())
+	cY2x, cY2y := curve.ScalarMult(Y2.X, Y2.Y, c.Bytes())
+	T2.X, T2.Y = curve.Add(rB2x, rB2y, cY2x, cY2y)
+
+	T3.Curve = curve
+	rA1x, rA1y := curve.ScalarMult(A1.X, A1.Y, r1.Bytes())
+	rA2x, rA2y := curve.ScalarMult(A2.X, A2.Y, r2.Bytes())
+	cAx, cAy := curve.ScalarMult(A.X, A.Y, c.Bytes())
+	T3.X, T3.Y = curve.Add(rA1x, rA1y, rA2x, rA2y)
+	T3.X, T3.Y = curve.Add(T3.X, T3.Y, cAx, cAy)
+
+	// 计算新的挑战值：c'=H(B,Y1,Y2,A1,A2,A,T1',T2',T3')
+	// 如上，c'用c_new代替
+	h := sm3.New()
+	h.Write(curve.Params().Gx.Bytes())
+	h.Write(curve.Params().Gy.Bytes())
+	h.Write(Y1.X.Bytes())
+	h.Write(Y1.Y.Bytes())
+	h.Write(Y2.X.Bytes())
+	h.Write(Y2.Y.Bytes())
+	h.Write(A1.X.Bytes())
+	h.Write(A1.Y.Bytes())
+	h.Write(A2.X.Bytes())
+	h.Write(A2.Y.Bytes())
+	h.Write(A.X.Bytes())
+	h.Write(A.Y.Bytes())
+	h.Write(T1.X.Bytes())
+	h.Write(T1.Y.Bytes())
+	h.Write(T2.X.Bytes())
+	h.Write(T2.Y.Bytes())
+	h.Write(T3.X.Bytes())
+	h.Write(T3.Y.Bytes())
+	c_new := new(big.Int).SetBytes(h.Sum(nil)[:32])
+
+	// 检查一致性：c?=c'
+	if 0 == c.Cmp(c_new) {
+		return true, nil
+	} else {
+		return false, nil
+	}
 }
 
 // ShareReplace uses shares to convert rct(raw ciphertext) to a new ciphertext.
@@ -292,6 +734,8 @@ func ShareReplace(shares *CipherVector, rct *CipherText) (*CipherText, error) {
 
 var one = new(big.Int).SetInt64(1)
 
+// randFieldElement generates a random k in Z_curve.N and returns.
+// 在椭圆曲线对生成元点G的秩N内生成随机数并返回。
 func randFieldElement(c elliptic.Curve, random io.Reader) (k *big.Int, err error) {
 	if random == nil {
 		random = rand.Reader //If there is no external trusted random source,please use rand.Reader to instead of it.
