@@ -234,6 +234,141 @@ func TestPointDecrypt(t *testing.T) {
 func TestShareCal(t *testing.T) {
 	// 集成于TestWorkFlow()，不单独测试
 }
+
+func TestShareProofGen_Vrf_NoB(t *testing.T) {
+	// 实验次数
+	count := 10
+	NoB := false
+
+	for i := 0; i < count; i++ {
+		// 生成私钥
+		priv, err := GenPrivKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// 生成目标公钥
+		targetPubKey := GenPoint()
+
+		// 生成密文左侧点
+		rB := GenPoint()
+
+		// 计算share
+		share, ri, err := ShareCal((*sm2.PublicKey)(targetPubKey), rB, priv)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if NoB {
+			// 计算证明
+			c, r1, r2, err := ShareProofGenNoB(ri, priv, share, (*sm2.PublicKey)(targetPubKey), rB)
+
+			// 计算证明验证结果
+			flag, err := ShareProofVryNoB(c, r1, r2, share, &priv.PublicKey, (*sm2.PublicKey)(targetPubKey), rB)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if false == flag {
+				fmt.Println()
+				fmt.Println(i, "th value of var: ", flag)
+				fmt.Println()
+			} else {
+				fmt.Println("   c:", c)
+				// fmt.Println("  r1:", r1)
+				// fmt.Println("  r2:", r2)
+				// fmt.Println("flag:", flag)
+			}
+		} else {
+			// 计算证明
+			c, r1, r2, err := ShareProofGen(ri, priv, share, (*sm2.PublicKey)(targetPubKey), rB)
+
+			// 计算证明验证结果
+			flag, err := ShareProofVry(c, r1, r2, share, &priv.PublicKey, (*sm2.PublicKey)(targetPubKey), rB)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if false == flag {
+				fmt.Println()
+				fmt.Println(i, "th value of var: ", flag)
+				fmt.Println()
+			} else {
+				fmt.Println("   c:", c)
+				// fmt.Println("  r1:", r1)
+				// fmt.Println("  r2:", r2)
+				// fmt.Println("flag:", flag)
+			}
+		}
+
+	}
+}
+
+func TestProofGen_Vrf_NoB(t *testing.T) {
+	count := 10
+	NoB := true
+
+	for i := 0; i < count; i++ {
+		// 生成 y1,Y1,y2,Y2: Y1=y1*B=y1.PublicKey,Y2=y2*B=y2.PublicKey
+		y1, err := GenPrivKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+		y2, err := GenPrivKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// 生成A1,A2
+		A1 := GenPoint()
+		A2 := GenPoint()
+
+		// 生成A=A1*y1+A2*y2
+		var A CurvePoint
+		A.Curve = A1.Curve
+		Ay1x, Ay1y := A1.Curve.ScalarMult(A1.X, A1.Y, y1.D.Bytes())
+		Ay2x, Ay2y := A2.Curve.ScalarMult(A2.X, A2.Y, y2.D.Bytes())
+		A.X, A.Y = A.Curve.Add(Ay1x, Ay1y, Ay2x, Ay2y)
+
+		if NoB {
+			// 计算证明
+			c, r1, r2, err := ProofGenNoB(y1.D, y2.D, (*CurvePoint)(&y1.PublicKey), (*CurvePoint)(&y2.PublicKey), A1, A2, &A)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			// 计算验证结果
+			flag, err := ProofVrfNoB(c, r1, r2, (*CurvePoint)(&y1.PublicKey), (*CurvePoint)(&y2.PublicKey), A1, A2, &A)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if false == flag {
+				fmt.Println(i, "th value of var: ", flag)
+			}
+		} else {
+			// 生成B
+			var B CurvePoint
+			B.Curve = y1.Curve
+			B.X = B.Curve.Params().Gx
+			B.Y = B.Curve.Params().Gy
+
+			// 计算证明
+			c, r1, r2, err := ProofGen(y1.D, y2.D, &B, (*CurvePoint)(&y1.PublicKey), (*CurvePoint)(&y2.PublicKey), A1, A2, &A)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			// 计算验证结果
+			flag, err := ProofVrf(c, r1, r2, &B, (*CurvePoint)(&y1.PublicKey), (*CurvePoint)(&y2.PublicKey), A1, A2, &A)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if false == flag {
+				fmt.Println(i, "th value of var: ", flag)
+			}
+		}
+
+	}
+}
+
 func TestShareReplace(t *testing.T) {
 	// 集成于TestWorkFlow()，不单独测试
 }
@@ -280,9 +415,31 @@ func TestWorkFlow(t *testing.T) {
 
 	// 5个server为q计算份额shares
 	shares := make(CipherVector, lens)
+	// ris := make([]big.Int,lens)
+
 	for i := 0; i < lens; i++ {
-		share, _ := ShareCal(&Q, &ct.K, &pks[i])
+		// 计算份额
+		share, ri, _ := ShareCal(&Q, &ct.K, &pks[i])
 		shares[i] = *share
+
+		// 计算证明
+		c, r1, r2, err := ShareProofGenNoB(ri, &pks[i], share, &Q, &ct.K)
+
+		// 计算证明验证结果
+		flag, err := ShareProofVryNoB(c, r1, r2, share, &pks[i].PublicKey, &Q, &ct.K)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if false == flag {
+			fmt.Println()
+			fmt.Println(i, "th value of var: ", flag)
+			fmt.Println()
+		} else {
+			// fmt.Println("   c:", c)
+			// fmt.Println("  r1:", r1)
+			// fmt.Println("  r2:", r2)
+			// fmt.Println("flag:", flag)
+		}
 	}
 
 	// q置换得到的份额，得到目标密文tct
